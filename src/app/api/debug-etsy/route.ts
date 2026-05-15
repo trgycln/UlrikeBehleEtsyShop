@@ -46,25 +46,43 @@ export async function GET() {
   }
   const listingsData = JSON.parse(listingsBody);
 
-  const firstListingId = listingsData.results?.[0]?.listing_id;
-  let imagesProbe: unknown = null;
-  if (firstListingId) {
-    const imgRes = await fetch(
-      `https://openapi.etsy.com/v3/application/listings/${firstListingId}/images`,
+  const firstFiveIds = (listingsData.results ?? []).slice(0, 5).map((l: { listing_id: number }) => l.listing_id);
+
+  let batchProbe: unknown = null;
+  if (firstFiveIds.length > 0) {
+    const idsParam = firstFiveIds.join(',');
+    const batchRes = await fetch(
+      `https://openapi.etsy.com/v3/application/listings/batch?listing_ids=${idsParam}&includes=Images`,
       { headers, cache: 'no-store' }
     );
-    imagesProbe = {
-      status: imgRes.status,
-      body: await imgRes.text(),
+    const batchBody = await batchRes.text();
+    let batchParsed: unknown = batchBody;
+    try {
+      const parsed = JSON.parse(batchBody);
+      batchParsed = {
+        count: parsed.count,
+        firstResult: parsed.results?.[0] ? {
+          listing_id: parsed.results[0].listing_id,
+          title: parsed.results[0].title,
+          hasImages: Array.isArray(parsed.results[0].images),
+          imagesCount: parsed.results[0].images?.length,
+          firstImageUrl: parsed.results[0].images?.[0]?.url_570xN,
+          keys: Object.keys(parsed.results[0]),
+        } : null,
+      };
+    } catch {}
+    batchProbe = {
+      status: batchRes.status,
+      data: batchParsed,
     };
   }
 
   return NextResponse.json({
     shopId,
     shopName,
-    count: listingsData.count,
-    resultsLength: listingsData.results?.length,
-    firstListingId,
-    imagesProbe,
+    totalListings: listingsData.count,
+    resultsInPage: listingsData.results?.length,
+    firstFiveIds,
+    batchProbe,
   });
 }
