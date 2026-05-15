@@ -1,65 +1,131 @@
-import Image from "next/image";
+import HomeClient, { type Product } from './HomeClient';
+import { getValidAccessToken } from '@/lib/etsy-auth';
 
-export default function Home() {
-  return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+type EtsyListing = {
+  listing_id: number;
+  title: string;
+  price: { amount: number; divisor: number };
+  url: string;
+  tags?: string[];
+  taxonomy_path?: string[];
+};
+
+async function fetchInBatches<T, R>(
+  items: T[],
+  batchSize: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const batchResults = await Promise.all(batch.map(fn));
+    results.push(...batchResults);
+  }
+  return results;
+}
+
+function mapCategory(title: string, tags: string[] = [], taxonomy: string[] = []): string {
+  const terms = [title, ...tags, ...taxonomy].join(' ').toLowerCase();
+
+  if (/\bohrring|earring|ohrhänger|ohrstecker/.test(terms)) return 'Ohrringe';
+  if (/\bring\b|\branlassring|fingerring/.test(terms) && !/ohrring/.test(terms)) return 'Ringe';
+  if (/armband|bracelet|armkette/.test(terms)) return 'Armbänder';
+  if (/kette|necklace|halskette|collier|anhänger|pendant/.test(terms)) return 'Ketten';
+  if (/häkel|crochet|körbchen|gehäkelt/.test(terms)) return 'Häkelarbeiten';
+  if (/schlüssel|keychain|schlüsselanhänger/.test(terms)) return 'Accessoires';
+  return 'Sonstiges';
+}
+
+async function fetchAllListings(
+  shopId: number,
+  headers: Record<string, string>
+): Promise<EtsyListing[]> {
+  const all: EtsyListing[] = [];
+  const limit = 100;
+  let offset = 0;
+
+  while (true) {
+    const res = await fetch(
+      `https://openapi.etsy.com/v3/application/shops/${shopId}/listings/active?limit=${limit}&offset=${offset}`,
+      { headers, next: { revalidate: 3600 } }
+    );
+    if (!res.ok) {
+      console.error('[Etsy] Listings page failed:', res.status, await res.text());
+      break;
+    }
+    const data = await res.json();
+    const results = (data.results ?? []) as EtsyListing[];
+    if (results.length === 0) break;
+    all.push(...results);
+    if (results.length < limit) break;
+    offset += limit;
+  }
+
+  return all;
+}
+
+async function fetchEtsyProducts(): Promise<Product[]> {
+  const apiKey = process.env.ETSY_API_KEY;
+  const apiSecret = process.env.ETSY_API_SECRET;
+  const shopName = process.env.ETSY_SHOP_NAME;
+  if (!apiKey || !shopName) return [];
+
+  let accessToken: string;
+  try {
+    accessToken = await getValidAccessToken();
+  } catch {
+    console.error('No valid Etsy access token. Visit http://localhost:3000/api/auth/etsy to authorize.');
+    return [];
+  }
+
+  const headers = {
+    'x-api-key': apiSecret ? `${apiKey}:${apiSecret}` : apiKey,
+    'Authorization': `Bearer ${accessToken}`,
+  };
+
+  const shopRes = await fetch(
+    `https://openapi.etsy.com/v3/application/shops?shop_name=${shopName}`,
+    { headers, next: { revalidate: 3600 } }
   );
+  if (!shopRes.ok) {
+    console.error('Shop fetch failed:', shopRes.status, await shopRes.text());
+    return [];
+  }
+
+  const shopData = await shopRes.json();
+  const shopId: number | undefined = shopData.results?.[0]?.shop_id;
+  if (!shopId) {
+    console.error('[Etsy] Shop ID not found for shop_name:', shopName);
+    return [];
+  }
+
+  const listings = await fetchAllListings(shopId, headers);
+  console.log('[Etsy] Total listings fetched:', listings.length);
+
+  const mapped = await fetchInBatches(listings, 15, async (listing) => {
+    const imgRes = await fetch(
+      `https://openapi.etsy.com/v3/application/listings/${listing.listing_id}/images`,
+      { headers, next: { revalidate: 3600 } }
+    );
+    const image = imgRes.ok
+      ? (await imgRes.json()).results?.[0]?.url_570xN ?? ''
+      : '';
+    return {
+      listing_id: listing.listing_id,
+      title: listing.title,
+      price: listing.price.amount / listing.price.divisor,
+      category: mapCategory(listing.title, listing.tags, listing.taxonomy_path),
+      url: listing.url || `https://www.etsy.com/listing/${listing.listing_id}`,
+      image,
+    };
+  });
+
+  const withImages = mapped.filter(p => p.image);
+  console.log('[Etsy] Mapped:', mapped.length, '/ with images:', withImages.length);
+  return withImages;
+}
+
+export default async function Home() {
+  const products = await fetchEtsyProducts();
+  return <HomeClient products={products} />;
 }
