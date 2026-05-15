@@ -1,6 +1,8 @@
 import HomeClient, { type Product } from './HomeClient';
 import { getValidAccessToken } from '@/lib/etsy-auth';
 
+type EtsyImage = { url_570xN: string };
+
 type EtsyListing = {
   listing_id: number;
   title: string;
@@ -8,21 +10,8 @@ type EtsyListing = {
   url: string;
   tags?: string[];
   taxonomy_path?: string[];
+  images?: EtsyImage[];
 };
-
-async function fetchInBatches<T, R>(
-  items: T[],
-  batchSize: number,
-  fn: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results: R[] = [];
-  for (let i = 0; i < items.length; i += batchSize) {
-    const batch = items.slice(i, i + batchSize);
-    const batchResults = await Promise.all(batch.map(fn));
-    results.push(...batchResults);
-  }
-  return results;
-}
 
 function mapCategory(title: string, tags: string[] = [], taxonomy: string[] = []): string {
   const terms = [title, ...tags, ...taxonomy].join(' ').toLowerCase();
@@ -102,23 +91,34 @@ async function fetchEtsyProducts(): Promise<Product[]> {
   const listings = await fetchAllListings(shopId, headers);
   console.log('[Etsy] Total listings fetched:', listings.length);
 
-  const mapped = await fetchInBatches(listings, 15, async (listing) => {
-    const imgRes = await fetch(
-      `https://openapi.etsy.com/v3/application/listings/${listing.listing_id}/images`,
+  const imageMap = new Map<number, string>();
+  for (let i = 0; i < listings.length; i += 100) {
+    const chunk = listings.slice(i, i + 100);
+    const ids = chunk.map(l => l.listing_id).join(',');
+    const batchRes = await fetch(
+      `https://openapi.etsy.com/v3/application/listings/batch?listing_ids=${ids}&includes=Images`,
       { headers, next: { revalidate: 3600 } }
     );
-    const image = imgRes.ok
-      ? (await imgRes.json()).results?.[0]?.url_570xN ?? ''
-      : '';
-    return {
-      listing_id: listing.listing_id,
-      title: listing.title,
-      price: listing.price.amount / listing.price.divisor,
-      category: mapCategory(listing.title, listing.tags, listing.taxonomy_path),
-      url: listing.url || `https://www.etsy.com/listing/${listing.listing_id}`,
-      image,
-    };
-  });
+    if (!batchRes.ok) {
+      console.error('[Etsy] Batch fetch failed:', batchRes.status, await batchRes.text());
+      continue;
+    }
+    const batchData = await batchRes.json();
+    for (const item of (batchData.results ?? []) as EtsyListing[]) {
+      const url = item.images?.[0]?.url_570xN;
+      if (url) imageMap.set(item.listing_id, url);
+    }
+  }
+  console.log('[Etsy] Images resolved via batch:', imageMap.size, '/', listings.length);
+
+  const mapped = listings.map(listing => ({
+    listing_id: listing.listing_id,
+    title: listing.title,
+    price: listing.price.amount / listing.price.divisor,
+    category: mapCategory(listing.title, listing.tags, listing.taxonomy_path),
+    url: listing.url || `https://www.etsy.com/listing/${listing.listing_id}`,
+    image: imageMap.get(listing.listing_id) ?? '',
+  }));
 
   const withImages = mapped.filter(p => p.image);
   console.log('[Etsy] Mapped:', mapped.length, '/ with images:', withImages.length);
