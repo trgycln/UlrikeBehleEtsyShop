@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { saveTokensToEnvLocal } from '@/lib/etsy-auth';
+import { saveTokensFromOAuth } from '@/lib/etsy-auth';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -22,6 +22,8 @@ export async function GET(request: NextRequest) {
   }
 
   const apiKey = process.env.ETSY_API_KEY!;
+  const origin = new URL(request.url).origin;
+  const redirectUri = `${origin}/api/auth/etsy/callback`;
 
   const tokenRes = await fetch('https://api.etsy.com/v3/public/oauth/token', {
     method: 'POST',
@@ -30,7 +32,7 @@ export async function GET(request: NextRequest) {
       grant_type: 'authorization_code',
       client_id: apiKey,
       ...(process.env.ETSY_API_SECRET ? { client_secret: process.env.ETSY_API_SECRET } : {}),
-      redirect_uri: 'http://localhost:3000/api/auth/etsy/callback',
+      redirect_uri: redirectUri,
       code,
       code_verifier: codeVerifier,
     }),
@@ -45,24 +47,23 @@ export async function GET(request: NextRequest) {
   const { access_token, refresh_token, expires_in } = await tokenRes.json();
 
   try {
-    saveTokensToEnvLocal(access_token, refresh_token, expires_in);
+    await saveTokensFromOAuth(access_token, refresh_token, expires_in);
   } catch (e) {
     return NextResponse.json({
-      error: '.env.local write failed',
+      error: 'Redis write failed',
+      details: String(e),
       access_token,
       refresh_token,
       expires_in,
-      manual_instructions: 'Add these values to .env.local manually, then restart the dev server.',
-    }, { status: 200 });
+    }, { status: 500 });
   }
 
   return new NextResponse(
-    `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;max-width:500px;margin:auto">
-      <h2 style="color:#2d6a4f">✅ Etsy bağlantısı başarılı!</h2>
-      <p>Token'lar <code>.env.local</code> dosyasına kaydedildi.</p>
-      <p><strong>Dev sunucusunu yeniden başlatın:</strong> terminalde <code>Ctrl+C</code> → <code>npm run dev</code></p>
-      <p>Ardından <a href="http://localhost:3000">localhost:3000</a> adresine gidin.</p>
+    `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="font-family:sans-serif;padding:2rem;max-width:500px;margin:auto">
+      <h2 style="color:#2d6a4f">Etsy bağlantısı başarılı</h2>
+      <p>Token'lar Upstash Redis'e kaydedildi ve otomatik olarak yenilenecektir.</p>
+      <p><a href="/">Ana sayfaya dön</a></p>
     </body></html>`,
-    { status: 200, headers: { 'Content-Type': 'text/html' } }
+    { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
   );
 }

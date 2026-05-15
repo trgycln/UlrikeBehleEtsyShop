@@ -1,17 +1,38 @@
-import fs from 'fs';
-import path from 'path';
+import { Redis } from '@upstash/redis';
 
-function updateEnvLine(content: string, key: string, value: string): string {
-  const regex = new RegExp(`^${key}=.*$`, 'm');
-  return regex.test(content)
-    ? content.replace(regex, `${key}=${value}`)
-    : content + `\n${key}=${value}`;
+const redis = new Redis({
+  url: process.env.KV_REST_API_URL!,
+  token: process.env.KV_REST_API_TOKEN!,
+});
+
+const TOKEN_KEY = 'etsy:tokens';
+
+type StoredTokens = {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+};
+
+async function loadTokens(): Promise<StoredTokens | null> {
+  const stored = await redis.get<StoredTokens>(TOKEN_KEY);
+  if (stored && stored.accessToken && stored.refreshToken) return stored;
+
+  const accessToken = process.env.ETSY_ACCESS_TOKEN;
+  const refreshToken = process.env.ETSY_REFRESH_TOKEN;
+  const expiresAt = Number(process.env.ETSY_TOKEN_EXPIRES_AT ?? 0);
+  if (!accessToken || !refreshToken) return null;
+
+  const seed: StoredTokens = { accessToken, refreshToken, expiresAt };
+  await redis.set(TOKEN_KEY, seed);
+  console.log('[Etsy] Seeded tokens into Redis from env vars');
+  return seed;
 }
 
-async function doRefresh(): Promise<string> {
-  const refreshToken = process.env.ETSY_REFRESH_TOKEN;
-  if (!refreshToken) throw new Error('No refresh token available');
+async function persistTokens(tokens: StoredTokens): Promise<void> {
+  await redis.set(TOKEN_KEY, tokens);
+}
 
+async function doRefresh(refreshToken: string): Promise<StoredTokens> {
   const res = await fetch('https://api.etsy.com/v3/public/oauth/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -30,59 +51,36 @@ async function doRefresh(): Promise<string> {
   }
 
   const data = await res.json();
-  const expiresAt = String(Date.now() + data.expires_in * 1000);
-
-  process.env.ETSY_ACCESS_TOKEN = data.access_token;
-  if (data.refresh_token) process.env.ETSY_REFRESH_TOKEN = data.refresh_token;
-  process.env.ETSY_TOKEN_EXPIRES_AT = expiresAt;
-
-  if (process.env.NODE_ENV === 'development') {
-    try {
-      const envPath = path.join(process.cwd(), '.env.local');
-      let content = fs.readFileSync(envPath, 'utf-8');
-      content = updateEnvLine(content, 'ETSY_ACCESS_TOKEN', data.access_token);
-      if (data.refresh_token) {
-        content = updateEnvLine(content, 'ETSY_REFRESH_TOKEN', data.refresh_token);
-      }
-      content = updateEnvLine(content, 'ETSY_TOKEN_EXPIRES_AT', expiresAt);
-      fs.writeFileSync(envPath, content);
-    } catch {
-      // .env.local write failed — in-memory update still applies
-    }
-  }
-
-  return data.access_token;
+  const tokens: StoredTokens = {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token ?? refreshToken,
+    expiresAt: Date.now() + data.expires_in * 1000,
+  };
+  await persistTokens(tokens);
+  console.log('[Etsy] Token refreshed and persisted to Redis');
+  return tokens;
 }
 
 export async function getValidAccessToken(): Promise<string> {
-  const accessToken = process.env.ETSY_ACCESS_TOKEN;
-  const expiresAt = Number(process.env.ETSY_TOKEN_EXPIRES_AT ?? 0);
+  const tokens = await loadTokens();
+  if (!tokens) throw new Error('No tokens stored. Visit /api/auth/etsy to authorize.');
 
-  if (!accessToken) throw new Error('No access token. Visit /api/auth/etsy to authorize.');
-
-  // Refresh 5 minutes before expiry
-  if (Date.now() > expiresAt - 5 * 60 * 1000) {
-    return doRefresh();
+  if (Date.now() > tokens.expiresAt - 5 * 60 * 1000) {
+    const refreshed = await doRefresh(tokens.refreshToken);
+    return refreshed.accessToken;
   }
 
-  return accessToken;
+  return tokens.accessToken;
 }
 
-export function saveTokensToEnvLocal(
+export async function saveTokensFromOAuth(
   accessToken: string,
   refreshToken: string,
   expiresIn: number
-): void {
-  const expiresAt = String(Date.now() + expiresIn * 1000);
-
-  process.env.ETSY_ACCESS_TOKEN = accessToken;
-  process.env.ETSY_REFRESH_TOKEN = refreshToken;
-  process.env.ETSY_TOKEN_EXPIRES_AT = expiresAt;
-
-  const envPath = path.join(process.cwd(), '.env.local');
-  let content = fs.readFileSync(envPath, 'utf-8');
-  content = updateEnvLine(content, 'ETSY_ACCESS_TOKEN', accessToken);
-  content = updateEnvLine(content, 'ETSY_REFRESH_TOKEN', refreshToken);
-  content = updateEnvLine(content, 'ETSY_TOKEN_EXPIRES_AT', expiresAt);
-  fs.writeFileSync(envPath, content);
+): Promise<void> {
+  await persistTokens({
+    accessToken,
+    refreshToken,
+    expiresAt: Date.now() + expiresIn * 1000,
+  });
 }

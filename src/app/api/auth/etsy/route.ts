@@ -1,11 +1,14 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   const apiKey = process.env.ETSY_API_KEY;
   if (!apiKey) {
-    return NextResponse.json({ error: 'ETSY_API_KEY missing in .env.local' }, { status: 500 });
+    return NextResponse.json({ error: 'ETSY_API_KEY missing' }, { status: 500 });
   }
+
+  const origin = new URL(request.url).origin;
+  const redirectUri = `${origin}/api/auth/etsy/callback`;
 
   const codeVerifier = crypto.randomBytes(32).toString('base64url');
   const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
@@ -13,7 +16,7 @@ export async function GET() {
 
   const params = new URLSearchParams({
     response_type: 'code',
-    redirect_uri: 'http://localhost:3000/api/auth/etsy/callback',
+    redirect_uri: redirectUri,
     scope: 'listings_r shops_r',
     client_id: apiKey,
     state,
